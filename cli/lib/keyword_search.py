@@ -1,18 +1,135 @@
-from .search_utils import DEFAULT_SEARCH_LIMIT, load_movies, load_stopwords
+import os
+import pickle
 import string
+import collections
+import math
+
 from nltk.stem import PorterStemmer
 
+from .search_utils import (DEFAULT_SEARCH_LIMIT, CACHE_DIR, load_movies, load_stopwords)
+
+class InvertedIndex:
+    def __init__(self):
+        self.index={}
+        self.docmap={}
+        self.term_frequencies: dict[int, collections.Counter] = {}
+        self.index_path = os.path.join(CACHE_DIR, "index.pkl")
+        self.docmap_path = os.path.join(CACHE_DIR, "docmap.pkl")
+        self.term_frequencies_path = os.path.join(CACHE_DIR, "term_frequencies.pkl")
+
+    def __add_document(self, doc_id, text):
+        tokens = tokenize_text(text)
+        for token in tokens:
+            if token not in self.index:
+                self.index[token] = set()
+            self.index[token].add(doc_id)
+            if doc_id not in self.term_frequencies:
+                self.term_frequencies[doc_id] = collections.Counter()
+            self.term_frequencies[doc_id][token] += 1
+
+    def get_tf(self, doc_id, term):
+        tokens = tokenize_text(term)
+        if len(tokens) > 1:
+            raise TypeError
+        token = tokens[0]
+        if token not in self.term_frequencies[doc_id]:
+            return 0
+        return self.term_frequencies[doc_id][token]
+    
+    def get_idf(self, term: str) -> float:
+        tokens = tokenize_text(term)
+        if len(tokens) > 1:
+            raise ValueError("term must be a single token")
+        token = tokens[0]
+        doc_count = len(self.docmap)
+        term_doc_count = len(self.index[token])
+        return math.log((doc_count + 1) / (term_doc_count + 1))
+    
+    def get_tfidf(self, doc_id, term) -> float:
+        tf = self.get_tf(doc_id, term)
+        idf = self.get_idf(term)
+        tf_idf = tf * idf
+        return tf_idf
+
+
+    def get_documents(self, term) -> list:
+        term = term.lower()
+        if term not in self.index:
+            return []
+        documents = self.index[term]
+        sorted_documents = list(documents)
+        sorted_documents.sort()
+        return sorted_documents
+    
+    def build(self):
+        movies = load_movies()
+        for movie in movies:
+            text = f"{movie['title']} {movie['description']}"
+            self.__add_document(movie['id'], text)
+            self.docmap[movie["id"]] = movie
+            
+    def save(self):
+        if not os.path.exists(CACHE_DIR):
+            os.mkdir(CACHE_DIR)
+        with open(self.index_path, "wb") as f:
+            pickle.dump(self.index, f)
+        with open(self.docmap_path, "wb") as f:
+            pickle.dump(self.docmap, f)
+        with open(self.term_frequencies_path, "wb") as f:
+            pickle.dump(self.term_frequencies, f)    
+
+    def load(self):
+        if not os.path.exists(self.index_path) or not os.path.exists(self.docmap_path):
+            raise FileNotFoundError
+        with open(self.index_path, "rb") as f:
+            self.index = pickle.load(f)
+        with open(self.docmap_path, "rb") as f:
+            self.docmap = pickle.load(f)
+        with open(self.term_frequencies_path, "rb") as f:
+            self.term_frequencies = pickle.load(f)
+            
+
+def build_command() -> None:
+    idx = InvertedIndex()
+    idx.build()
+    idx.save()
+
 def search_command(query: str, limit: int = DEFAULT_SEARCH_LIMIT) -> list[dict]:
-    movies = load_movies()
-    results = []
+    try:
+        idx = InvertedIndex()
+        idx.load()
+    except FileNotFoundError:
+        print("Error: File not found.")
+    
+    res_count = 0
+    documents = []
     tokenized_query = tokenize_text(query)
-    for movie in movies:
-        tokenized_title = tokenize_text(movie["title"])
-        if match_exists(tokenized_query, tokenized_title):
-            results.append(movie)
-            if len(results) >= limit:
+    for token in tokenized_query:
+        results = idx.get_documents(token)
+        for r in results:
+            documents.append(idx.docmap[r])
+            res_count += 1
+            if res_count >= 5:
                 break
-    return results
+    return documents
+        
+def tf_command(doc_id: int, term: str) -> int:
+    try:
+        idx = InvertedIndex()
+        idx.load()
+    except FileNotFoundError:
+        print("Error: File not found.")
+    return idx.get_tf(doc_id, term)
+
+def idf_command(term: str) -> float:
+    idx = InvertedIndex()
+    idx.load()
+    return idx.get_idf(term)
+
+def tfidf_command(doc_id: int, term: str) -> float:
+    idx = InvertedIndex()
+    idx.load()
+    return idx.get_tfidf(doc_id, term)
     
 def preprocess_text(text: str) -> str:
     text = text.lower()
